@@ -1,40 +1,149 @@
-import "./styles.css";
-
-import PartySocket from "partysocket";
+import YPartyKitProvider from "y-partykit/provider";
+import * as Y from "yjs";
 
 declare const PARTYKIT_HOST: string;
 
-let pingInterval: ReturnType<typeof setInterval>;
+export class AuthedYPartyKitProvider extends YPartyKitProvider {
+  private getToken: () => Promise<string | null>;
 
-// Let's append all the messages we get into this DOM element
-const output = document.getElementById("app") as HTMLDivElement;
+  constructor(
+    host: string,
+    room: string,
+    doc: Y.Doc,
+    getTokenFunction: () => Promise<string | null>,
+    options: ConstructorParameters<typeof YPartyKitProvider>[3] = {}
+  ) {
+    super(host, room, doc, { ...options, connect: false });
+    console.log(getTokenFunction);
+    this.getToken = getTokenFunction;
+    if (options.connect !== false) {
+      this.connect();
+    }
+  }
 
-// Helper function to add a new line to the DOM
-function add(text: string) {
-  output.appendChild(document.createTextNode(text));
-  output.appendChild(document.createElement("br"));
+  async connect() {
+    const url = new URL(this.url);
+    const token = await this.getToken();
+    if (token) {
+      url.searchParams.set("authToken", token);
+      this.url = url.toString();
+      console.log("Connecting with url", this.url);
+    } else {
+      console.error("No token received, not connecting");
+    }
+
+    super.connect();
+  }
 }
 
-// A PartySocket is like a WebSocket, except it's a bit more magical.
-// It handles reconnection logic, buffering messages while it's offline, and more.
-const conn = new PartySocket({
-  host: PARTYKIT_HOST,
-  room: "my-new-room",
-});
+const doc = new Y.Doc();
+const getAuth = () => {
+  // get fake token (just current date string)
+  return new Promise<string | null>((resolve, reject) => {
+    setTimeout(() => resolve(new Date().toISOString()), 100);
+  });
+};
 
-// You can even start sending messages before the connection is open!
-conn.addEventListener("message", (event) => {
-  add(`Received -> ${event.data}`);
-});
+const provider = new AuthedYPartyKitProvider(
+  PARTYKIT_HOST,
+  "yjs-demo",
+  doc,
+  getAuth
+);
 
-// Let's listen for when the connection opens
-// And send a ping every 2 seconds right after
-conn.addEventListener("open", () => {
-  add("Connected!");
-  add("Sending a ping every 2 seconds...");
-  // TODO: make this more interesting / nice
-  clearInterval(pingInterval);
-  pingInterval = setInterval(() => {
-    conn.send("ping");
-  }, 1000);
+// ignore everything below this line
+// ------------------------------------------
+
+const yMessage: Y.Text = doc.getText("message");
+const awareness = provider.awareness;
+
+const generateRandomId = () =>
+  Date.now().toString(36) + Math.random().toString(36).substring(2);
+
+let userId: string | null;
+userId = localStorage.getItem("userId");
+
+if (userId === null) {
+  const newRandomId = generateRandomId();
+  localStorage.setItem("userId", newRandomId);
+  userId = newRandomId;
+}
+
+window.addEventListener("load", () => {
+  const connectBtn = document.getElementById(
+    "y-connect-btn"
+  ) as HTMLButtonElement;
+  const sendBtn = document.getElementById("y-send-btn") as HTMLButtonElement;
+  const resetBtn = document.getElementById("y-reset-btn") as HTMLButtonElement;
+  const messageInput = document.getElementById(
+    "y-input-message"
+  ) as HTMLInputElement;
+  const messageElement = document.getElementById("y-text") as HTMLSpanElement;
+  const awarenessElement = document.getElementById(
+    "y-connected"
+  ) as HTMLParagraphElement;
+
+  awareness.on("change", () => {
+    const connectedPeople = awareness.getStates().size;
+    awarenessElement.textContent = `${connectedPeople} ${
+      connectedPeople === 1 ? "Person" : "People"
+    } here.`;
+  });
+
+  connectBtn.addEventListener("click", () => {
+    if (provider.shouldConnect) {
+      provider.disconnect();
+    } else {
+      provider.connect();
+    }
+  });
+
+  const onConnect = () => {
+    connectBtn.textContent = "Disconnect";
+
+    sendBtn.disabled = false;
+    sendBtn.textContent = "Broadcasting Message";
+
+    resetBtn.disabled = false;
+    resetBtn.textContent = "Reset Broadcast";
+
+    messageInput.disabled = false;
+    messageElement.textContent = yMessage.toJSON();
+
+    awareness.setLocalState({ id: userId });
+  };
+
+  const onDisconnect = () => {
+    connectBtn.textContent = "Connect";
+
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Please Connect Before Broadcasting Message";
+
+    resetBtn.disabled = true;
+    resetBtn.textContent = "Please Connect Before Resetting";
+
+    messageInput.disabled = true;
+    messageElement.textContent = "";
+    awarenessElement.textContent = "";
+  };
+
+  provider.on("sync", (connected: boolean) =>
+    connected ? onConnect() : onDisconnect()
+  );
+
+  sendBtn.addEventListener("click", () => {
+    doc.transact(() => {
+      yMessage.delete(0, yMessage.length);
+      yMessage.insert(0, messageInput.value);
+      messageInput.value = "";
+    });
+  });
+
+  resetBtn.addEventListener("click", () => {
+    yMessage.delete(0, yMessage.length);
+  });
+
+  yMessage.observe((event, _) => {
+    messageElement.textContent = event.currentTarget.toJSON();
+  });
 });
